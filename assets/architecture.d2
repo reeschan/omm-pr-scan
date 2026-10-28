@@ -1,0 +1,74 @@
+# omm-pr-scan architecture
+# __MONO__ is the color of single-color logos. render.py replaces it with 000000 (light) and ffffff (dark) and draws two SVGs.
+# Render: python ~/.claude/skills/arch-diagram/versions/v1.1/scripts/render.py assets/architecture.d2
+direction: right
+
+vars: {
+  d2-config: {
+    layout-engine: elk
+    pad: 40
+  }
+}
+
+classes: {
+  svc: {
+    shape: rectangle
+    style: {
+      border-radius: 12
+      font-size: 15
+    }
+  }
+  ext: {
+    shape: image
+    width: 64
+    height: 64
+    label.near: outside-bottom-center
+  }
+  zone: {
+    style.border-radius: 16
+  }
+}
+
+dev: Developer {
+  class: ext
+  icon: https://icons.terrastruct.com/essentials%2F005-programmer.svg
+}
+
+pc: "Developer's machine" {
+  class: zone
+  icon: https://icons.terrastruct.com/tech%2Flaptop.svg
+
+  claude: "Claude Code\nruns the SKILL.md procedure" {
+    class: svc
+    icon: https://cdn.simpleicons.org/anthropic/__MONO__
+  }
+
+  map: "map-changes.mjs\nchanged files → .omm elements" {
+    class: svc
+    icon: https://cdn.simpleicons.org/nodedotjs
+  }
+
+  omm: "omm CLI\nwrite / validate / diff / delete" {
+    class: svc
+    icon: https://cdn.simpleicons.org/mermaid
+  }
+
+  repo: "Git repository\nsource + committed .omm/" {
+    class: svc
+    icon: https://cdn.simpleicons.org/git
+  }
+}
+
+github: "GitHub\nPR base / origin" {
+  class: ext
+  icon: https://cdn.simpleicons.org/github/__MONO__
+}
+
+dev <-> pc.claude: "/omm-pr-scan [range] ⇄ one approval question, report"
+pc.claude -> github: "gh pr view, git fetch (read only)"
+pc.claude -> pc.repo: "git diff --name-status"
+pc.claude -> pc.map: "changed files"
+pc.repo -> pc.map: ".omm/ diagram labels"
+pc.map -> pc.claude: "JSON: matched / renamed / unmatched / deletion candidates"
+pc.claude -> pc.omm: "update only the matched elements"
+pc.omm -> pc.repo: "writes .omm/ (working tree only)"
