@@ -8,7 +8,7 @@ omm に付いている `/omm-scan` は、毎回コードベース全体を読み
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/architecture-dark.svg">
-  <img src="assets/architecture-light.svg" alt="omm-pr-scan の構成図。開発者は自分の PC の Claude Code で /omm-pr-scan を打ち、承認の質問 1 回と報告を受け取る。Claude Code は gh pr view と git fetch で GitHub から PR の向き先を読み、Git リポジトリから git diff --name-status を取り、変わったファイルを map-changes.mjs に渡す。map-changes.mjs はコミット済みの .omm/ の図のラベルを読み、当たったファイル・名前変更・当たらないファイル・消す候補を JSON で返す。Claude Code は omm CLI で当たった要素だけを更新し、omm CLI は .omm/ を作業ツリーにだけ書く。">
+  <img src="assets/architecture-light.svg" alt="omm-pr-scan の構成図。開発者は自分の PC の Claude Code で /omm-pr-scan を打ち、承認の質問 1 回と報告を受け取る。Claude Code は gh pr view と git fetch で GitHub から PR の向き先を読み、Git リポジトリから git diff --name-status を取り、変わったファイルを map-changes.mjs に渡す。map-changes.mjs はコミット済みの .omm/ の図のラベルを読み、当たったファイル・名前変更・当たらないファイル・消す候補を JSON で返す。Claude Code は omm CLI で当たった要素だけを更新し、omm CLI は .omm/ を作業ツリーにだけ書く。--cache のときは、Claude Code が cache.mjs に、リポジトリの外のキャッシュのフォルダから一番近い走査を探させ、作業フォルダに写させる。omm CLI はその作業フォルダに書き、cache.mjs が全体の走査が要るかを確かめて、新しいフィンガープリントで保存する。">
 </picture>
 
 図のソースは `assets/architecture.d2` です ([D2](https://d2lang.com) で描画)。
@@ -51,6 +51,17 @@ cp -r omm-pr-scan/skills/omm-pr-scan ~/.claude/skills/
 /omm-pr-scan --exclude 'src/generated/**'
 ```
 
+### 走査の結果をリポジトリの外に置く (`--cache`)
+
+`.omm/` をリポジトリに入れない場合は、走査の結果を、走査したコミットの木を鍵にしてキャッシュのフォルダに置きます。鍵が外れたら全体を走査し直さずに、一番近い走査を差分で今のコミットに合わせます。
+
+```text
+/omm-pr-scan --cache                  # 一番近い走査を HEAD に合わせる
+/omm-pr-scan --cache --to <ref> --perspectives overall-architecture,dependency-map
+```
+
+`scripts/cache.mjs` が、変わったファイルが一番少ない走査を (祖先かどうかによらず) 選び、作業フォルダに写します。`omm validate` が通ったら、新しいフィンガープリントで保存します。差が大きい、直下に新しいフォルダができた、視点の直下の要素が消えた、要素の半分より多くに当たった、のどれかなら、全体の走査をするかを聞きます。置き場所は `--cache-dir`、`$OMM_CACHE_DIR`、メインの clone の横の `.omm-cache` の順に決めます。
+
 ## 限界
 
 - 引き当てはファイルのパスで行います。振る舞いで分けた視点 (状態の遷移など) では、ラベルに書かれていないファイルの話をしていることがあり、その要素は更新されません。
@@ -59,7 +70,7 @@ cp -r omm-pr-scan/skills/omm-pr-scan ~/.claude/skills/
 ## 開発
 
 ```bash
-node --test skills/omm-pr-scan/scripts/map-changes.test.mjs
+node --test skills/omm-pr-scan/scripts/*.test.mjs
 ```
 
 設計の仕様は `skills/omm-pr-scan/SPEC.md` です。

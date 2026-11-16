@@ -57,6 +57,16 @@ pc: "Developer's machine" {
     class: svc
     icon: https://cdn.simpleicons.org/git
   }
+
+  cachejs: "cache.mjs (--cache)\nlookup / derive / gate / store" {
+    class: svc
+    icon: https://cdn.simpleicons.org/nodedotjs
+  }
+
+  cache: "Scan cache (outside the repo)\n<clone>/<tree hash>/ .omm/ + fingerprint.json" {
+    class: svc
+    icon: https://icons.terrastruct.com/essentials%2F245-folder.svg
+  }
 }
 
 github: "GitHub\nPR base / origin" {
@@ -72,3 +82,6 @@ pc.repo -> pc.map: ".omm/ diagram labels"
 pc.map -> pc.claude: "JSON: matched / renamed / unmatched / deletion candidates"
 pc.claude -> pc.omm: "update only the matched elements"
 pc.omm -> pc.repo: "writes .omm/ (working tree only)"
+pc.claude -> pc.cachejs: "--cache: find, copy, check, save"
+pc.cachejs <-> pc.cache: "nearest scan → work folder → new fingerprint"
+pc.omm -> pc.cache: "--cache: writes the work folder" {style.stroke-dash: 4}

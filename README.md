@@ -10,7 +10,7 @@ A [Claude Code](https://claude.com/claude-code) skill that updates the [oh-my-me
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/architecture-dark.svg">
-  <img src="assets/architecture-light.svg" alt="omm-pr-scan architecture. The developer runs /omm-pr-scan in Claude Code on their machine and gets one approval question and a report back. Claude Code reads the PR base from GitHub with gh pr view and git fetch, takes git diff --name-status from the Git repository, and passes the changed files to map-changes.mjs. map-changes.mjs reads the diagram labels in the committed .omm/ and returns JSON with the matched, renamed and unmatched files and the deletion candidates. Claude Code then updates only the matched elements through the omm CLI, which writes .omm/ in the working tree only.">
+  <img src="assets/architecture-light.svg" alt="omm-pr-scan architecture. The developer runs /omm-pr-scan in Claude Code on their machine and gets one approval question and a report back. Claude Code reads the PR base from GitHub with gh pr view and git fetch, takes git diff --name-status from the Git repository, and passes the changed files to map-changes.mjs. map-changes.mjs reads the diagram labels in the committed .omm/ and returns JSON with the matched, renamed and unmatched files and the deletion candidates. Claude Code then updates only the matched elements through the omm CLI, which writes .omm/ in the working tree only. With --cache, Claude Code asks cache.mjs to find the nearest stored scan in a cache folder outside the repository and copy it to a work folder; the omm CLI writes that work folder, and cache.mjs checks whether a full scan is needed and saves the result under the new fingerprint.">
 </picture>
 
 The diagram source is `assets/architecture.d2` (rendered with [D2](https://d2lang.com)).
@@ -53,6 +53,17 @@ cp -r omm-pr-scan/skills/omm-pr-scan ~/.claude/skills/
 /omm-pr-scan --exclude 'src/generated/**'
 ```
 
+### Keeping scans outside the repository (`--cache`)
+
+If you keep `.omm/` out of the repository, store each scan in a cache folder keyed by the tree of the scanned commit, and bring the nearest stored scan up to date by its diff instead of scanning again:
+
+```text
+/omm-pr-scan --cache                  # bring the nearest stored scan up to HEAD
+/omm-pr-scan --cache --to <ref> --perspectives overall-architecture,dependency-map
+```
+
+`scripts/cache.mjs` picks the stored scan with the fewest changed files (ancestor or not), copies it to a work folder, and saves the result under the new fingerprint once `omm validate` passes. It falls back to asking for a full scan when the diff is large, a new top folder appears, a top element disappears, or more than half of the elements are hit. The cache folder is `--cache-dir`, `$OMM_CACHE_DIR`, or `.omm-cache` beside the main clone.
+
 ## Limitations
 
 - Mapping is by file path. A perspective split by behavior (for example a state-transition view) may describe a file that none of its labels names; such elements are not updated.
@@ -61,7 +72,7 @@ cp -r omm-pr-scan/skills/omm-pr-scan ~/.claude/skills/
 ## Development
 
 ```bash
-node --test skills/omm-pr-scan/scripts/map-changes.test.mjs
+node --test skills/omm-pr-scan/scripts/*.test.mjs
 ```
 
 The design spec is `skills/omm-pr-scan/SPEC.md`.
