@@ -24,7 +24,9 @@
 //   `derived <work dir> <from commit>..<at commit>`. Run omm with that folder as the working directory.
 // gate reads map-changes output for the work dir and prints `ok`, or `full <reason>` when a full
 //   scan is the better choice (a new top folder, a removed top element, too many elements hit).
-// store saves a work dir under its fingerprint (or, with --at, moves the working tree's .omm/ there).
+// store saves a work dir under its fingerprint (or, with --at, moves the working tree's .omm/ there; the
+//   scan dirs of the working tree must then match REF). A stored scan of the same trees is kept only when it
+//   has every perspective of the new one; otherwise the new one replaces it and takes over its other perspectives.
 // Exit codes: 0 = done, 1 = (check) .omm/ is left in the working tree, 2 = bad arguments, git or input.
 
 import { spawnSync } from 'node:child_process';
@@ -206,6 +208,11 @@ function perspectivesIn(folder) {
   }
 }
 
+function covers(folder, wanted) {
+  const has = perspectivesIn(folder);
+  return wanted.every((name) => has.includes(name));
+}
+
 function ommVersion() {
   const done = spawnSync('omm', ['--version'], { encoding: 'utf8', shell: process.platform === 'win32', windowsHide: true });
   const out = done.status === 0 ? done.stdout.trim() : '';
@@ -292,7 +299,9 @@ function numberOption(options, name, fallback) {
 
 export function lookup(repo, options) {
   const target = repo.target(options.at);
-  if (isHit(target.folder, target.trees)) return `hit ${target.folder}`;
+  if (isHit(target.folder, target.trees) && covers(target.folder, list(options.perspectives))) {
+    return `hit ${target.folder}`;
+  }
   const settings = {
     perspectives: options.perspectives,
     maxChain: numberOption(options, 'max-chain', DEFAULTS.maxChain),
@@ -404,17 +413,70 @@ function baseRecord(repo, { commit, dirs, trees }) {
   return record;
 }
 
-// Put `work` (a folder holding .omm/) at `folder`. A stored scan already there for the same trees wins.
+// Whether the scan stored at `folder` can stand in for `work`: the same trees and every perspective of work.
+function keeps(folder, work, trees) {
+  return fs.existsSync(folder) && isHit(folder, trees) && covers(folder, perspectivesIn(work));
+}
+
+// Perspectives are separate folders, so the ones only the stored scan of the same trees has are carried over.
+function carryPerspectives(folder, work, trees) {
+  if (!isHit(folder, trees)) return;
+  const has = perspectivesIn(work);
+  const added = perspectivesIn(folder).filter((name) => !has.includes(name));
+  for (const name of added) copyDir(path.join(folder, OMM, name), path.join(work, OMM, name));
+  if (added.length === 0) return;
+  const record = readJson(path.join(work, RECORD));
+  if (record) writeJson(path.join(work, RECORD), { ...record, perspectives: perspectivesIn(work) });
+}
+
+// Put `work` (a folder holding .omm/) at `folder`. A stored scan of the same trees that already has
+// every perspective of work wins; otherwise work replaces it, and the old folder is restored on failure.
 function settle(work, folder, trees) {
-  if (fs.existsSync(folder)) {
-    if (isHit(folder, trees)) {
-      fs.rmSync(work, { recursive: true, force: true });
+  const dropWork = () => fs.rmSync(work, { recursive: true, force: true });
+  if (keeps(folder, work, trees)) {
+    dropWork();
+    return `exists ${folder}`;
+  }
+  const had = fs.existsSync(folder);
+  if (had) carryPerspectives(folder, work, trees);
+  const old = `${folder}${PARTIAL}replaced-${process.pid}`;
+  if (had) fs.renameSync(folder, old);
+  try {
+    fs.renameSync(work, folder);
+  } catch (error) {
+    // Another run published the same trees between the check above and this rename.
+    if (keeps(folder, work, trees)) {
+      dropWork();
+      if (had) fs.rmSync(old, { recursive: true, force: true });
       return `exists ${folder}`;
     }
-    fs.rmSync(folder, { recursive: true, force: true });
+    if (had && !fs.existsSync(folder)) fs.renameSync(old, folder);
+    throw error;
   }
-  fs.renameSync(work, folder);
+  if (had) fs.rmSync(old, { recursive: true, force: true });
   return `stored ${folder}`;
+}
+
+// A rename cannot cross file systems (EXDEV); then copy, and leave the source for the caller to remove.
+function moveOrCopy(source, target) {
+  try {
+    fs.renameSync(source, target);
+    return 'moved';
+  } catch (error) {
+    if (error.code !== 'EXDEV') throw error;
+    copyDir(source, target);
+    return 'copied';
+  }
+}
+
+// A full scan reads the working tree, so it may be stored under a commit only when the scan dirs match it.
+function assertTreeMatches(repo, target) {
+  const head = repo.commit('HEAD');
+  const same = JSON.stringify(sortKeys(repo.trees(head, target.dirs))) === JSON.stringify(sortKeys(target.trees));
+  const dirty = git(repo.root, ['status', '--porcelain', '--untracked-files=all', '--', ...repo.pathspec(target.dirs)]);
+  if (!same || dirty) {
+    fail(`the working tree does not match ${target.commit} in ${target.dirs.join(',')}; scan a checkout of that commit`);
+  }
 }
 
 export function store(repo, options) {
@@ -423,9 +485,16 @@ export function store(repo, options) {
   const source = path.join(repo.root, OMM);
   if (git(repo.root, ['ls-files', '--', OMM])) fail(`${OMM}/ is tracked in this repository; leave it as it is`);
   if (!fs.existsSync(source)) fail(`${source} is missing (run the scan first)`);
+  assertTreeMatches(repo, target);
   const work = `${target.folder}${PARTIAL}${process.pid}`;
   fs.mkdirSync(work, { recursive: true });
-  fs.renameSync(source, path.join(work, OMM));
+  let how;
+  try {
+    how = moveOrCopy(source, path.join(work, OMM));
+  } catch (error) {
+    fs.rmSync(work, { recursive: true, force: true });
+    throw error;
+  }
   writeJson(path.join(work, RECORD), {
     ...baseRecord(repo, target),
     omm_version: ommVersion(),
@@ -435,7 +504,9 @@ export function store(repo, options) {
     chain_depth: 0,
     full_scan: { folder: path.basename(target.folder), commit: target.commit },
   });
-  return settle(work, target.folder, target.trees);
+  const line = settle(work, target.folder, target.trees);
+  if (how === 'copied') fs.rmSync(source, { recursive: true, force: true });
+  return line;
 }
 
 function storeDerived(repo, options) {
@@ -489,8 +560,8 @@ function exportScan(repo, options) {
   const dest = path.join(repo.root, OMM);
   if (fs.existsSync(dest)) {
     if (!git(repo.root, ['ls-files', '--', OMM])) fail(`${dest} is already in the working tree and not tracked`);
-    if (git(repo.root, ['status', '--porcelain', '--untracked-files=all', '--', OMM])) {
-      fail(`${dest} has local changes or untracked files`);
+    if (git(repo.root, ['status', '--porcelain', '--untracked-files=all', '--ignored', '--', OMM])) {
+      fail(`${dest} has local changes, untracked or ignored files`);
     }
   }
   const fresh = `${dest}.export-${process.pid}`;

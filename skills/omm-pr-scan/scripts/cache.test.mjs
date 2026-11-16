@@ -232,6 +232,56 @@ test('store without --work moves the working tree .omm/ and refuses a tracked on
   assert.equal(cache(ctx, 'check').status, 1);
 });
 
+test('an exact tree without a wanted perspective is not a hit', (t) => {
+  const ctx = makeRepo(t, SRC);
+  seed(ctx, ctx.commit);
+  assert.match(cacheOk(ctx, 'lookup', '--perspectives', 'data-flow'), / no-candidate$/);
+  assert.match(cacheOk(ctx, 'lookup', '--perspectives', 'overall-architecture'), /^hit /);
+});
+
+test('a full scan with a new perspective replaces the stored one and keeps its other perspectives', (t) => {
+  const ctx = makeRepo(t, SRC);
+  const folder = seed(ctx, ctx.commit);
+  writeTree(path.join(ctx.repo, '.omm'), {
+    'data-flow/diagram.mmd': diagram(node('ui', 'UI', 'src/ui/')),
+    'data-flow/ui/description.md': 'ui\n',
+  });
+  assert.equal(cacheOk(ctx, 'store', '--perspectives', 'data-flow'), `stored ${folder}`);
+  assert.ok(fs.existsSync(path.join(folder, '.omm', 'data-flow', 'diagram.mmd')));
+  assert.ok(fs.existsSync(path.join(folder, '.omm', 'overall-architecture', 'diagram.mmd')));
+  const record = JSON.parse(fs.readFileSync(path.join(folder, 'fingerprint.json'), 'utf8'));
+  assert.deepEqual(record.perspectives.sort(), ['data-flow', 'overall-architecture']);
+  assert.deepEqual(fs.readdirSync(path.dirname(folder)), [path.basename(folder)]);
+
+  writeTree(path.join(ctx.repo, '.omm'), { 'data-flow/diagram.mmd': 'graph LR\n' });
+  assert.equal(cacheOk(ctx, 'store', '--perspectives', 'data-flow'), `exists ${folder}`);
+  assert.ok(!fs.existsSync(path.join(ctx.repo, '.omm')));
+});
+
+test('store refuses a full scan whose working tree does not match the commit', (t) => {
+  const ctx = makeRepo(t, SRC);
+  const first = ctx.commit;
+  commitTree(ctx.repo, { 'src/ui/a.ts': 'a2\n' }, 'two');
+  writeTree(path.join(ctx.repo, '.omm'), OMM);
+  const other = cache(ctx, 'store', '--at', first);
+  assert.equal(other.status, 2);
+  assert.match(other.stderr, /does not match/);
+  writeTree(ctx.repo, { 'src/ui/b.ts': 'dirty\n' });
+  assert.equal(cache(ctx, 'store').status, 2);
+  assert.ok(fs.existsSync(path.join(ctx.repo, '.omm')), 'the scan is left in place');
+});
+
+test('export refuses to replace a .omm/ that holds ignored files', (t) => {
+  const ctx = makeRepo(t, SRC);
+  seed(ctx, ctx.commit);
+  commitTree(ctx.repo, { '.omm/overall-architecture/description.md': 'old\n', '.gitignore': '.omm/*.local\n' }, 'omm');
+  writeTree(ctx.repo, { '.omm/notes.local': 'mine\n' });
+  const refused = cache(ctx, 'export');
+  assert.equal(refused.status, 2);
+  assert.match(refused.stderr, /ignored/);
+  assert.ok(fs.existsSync(path.join(ctx.repo, '.omm', 'notes.local')));
+});
+
 test('discard removes only work folders', (t) => {
   const ctx = makeRepo(t, SRC);
   const from = seed(ctx, ctx.commit);
