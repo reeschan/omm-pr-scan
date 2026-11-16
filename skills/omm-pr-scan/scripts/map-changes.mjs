@@ -1,12 +1,15 @@
 #!/usr/bin/env node
 // Map changed files to the .omm elements that own them.
-// Usage: node map-changes.mjs --omm <.omm folder> --changes <file | -> [--root <repo root>] [--exclude <glob>]...
+// Usage: node map-changes.mjs --omm <.omm folder> --changes <file | -> [--root <repo root>] [--at <commit>] [--exclude <glob>]...
 // --changes is the output of `git diff --name-status -M`. Node standard library only.
+// --at judges whether a responsible path still exists in that commit (git ls-tree) instead of the files under --root.
 
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
-const DEFAULT_EXCLUDES = [
+export const DEFAULT_EXCLUDES = [
   '**/*.test.*',
   '**/*.spec.*',
   '**/__tests__/**',
@@ -22,7 +25,7 @@ const DEFAULT_EXCLUDES = [
 ];
 
 // Static assets are matched without regard to the case of the extension.
-const DEFAULT_EXCLUDES_IGNORE_CASE = [
+export const DEFAULT_EXCLUDES_IGNORE_CASE = [
   '**/*.{png,jpg,jpeg,gif,svg,webp,ico,woff,woff2,ttf,otf,glb,gltf,mp3,mp4}',
 ];
 
@@ -90,16 +93,17 @@ function normalizeChangePath(value) {
 }
 
 function parseArgs(argv) {
-  const options = { omm: null, changes: null, root: null, excludes: [] };
+  const options = { omm: null, changes: null, root: null, at: null, excludes: [] };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
-    if (arg === '--omm' || arg === '--changes' || arg === '--root' || arg === '--exclude') {
+    if (['--omm', '--changes', '--root', '--at', '--exclude'].includes(arg)) {
       const value = argv[i + 1];
       if (value === undefined) usageError(`${arg} requires a value`);
       i += 1;
       if (arg === '--omm') options.omm = value;
       else if (arg === '--changes') options.changes = value;
       else if (arg === '--root') options.root = value;
+      else if (arg === '--at') options.at = value;
       else options.excludes.push(value);
     } else {
       usageError(`unknown argument: ${arg}`);
@@ -149,7 +153,7 @@ function globSource(glob) {
   return source;
 }
 
-function globToRegExp(glob, flags = '') {
+export function globToRegExp(glob, flags = '') {
   return new RegExp(`^${globSource(toPosix(glob))}$`, flags);
 }
 
@@ -197,7 +201,7 @@ function collectDiagramFiles(dir, base, out) {
   }
 }
 
-function readElements(ommRoot) {
+export function readElements(ommRoot) {
   const diagrams = [];
   collectDiagramFiles(ommRoot, ommRoot, diagrams);
   diagrams.sort((a, b) => byCodeUnit(a.relative, b.relative));
@@ -250,7 +254,7 @@ function responsiblePathKind(responsiblePath) {
   return 'file';
 }
 
-function matchesResponsiblePath(responsiblePath, file) {
+export function matchesResponsiblePath(responsiblePath, file) {
   const kind = responsiblePathKind(responsiblePath);
   if (kind === 'dir') return file.startsWith(responsiblePath);
   if (kind === 'file') return file === responsiblePath;
@@ -369,19 +373,49 @@ function globExistsUnderRoot(root, glob) {
   return found;
 }
 
-// movedFrom: old paths of renames in the same input whose new path exists under root.
-function responsiblePathStillExists(root, responsiblePath, movedFrom) {
-  const kind = responsiblePathKind(responsiblePath);
+// Where existence is judged: the files under root, or the files of one commit.
+function workingTreeFiles(root) {
+  return {
+    hasFile: (file) => fs.existsSync(absoluteUnderRoot(root, file)),
+    stillExists: (responsiblePath) => {
+      const kind = responsiblePathKind(responsiblePath);
+      if (kind === 'glob') return globExistsUnderRoot(root, responsiblePath);
+      const target = absoluteUnderRoot(root, responsiblePath.replace(/\/+$/, ''));
+      let stat;
+      try {
+        stat = fs.statSync(target);
+      } catch {
+        return false;
+      }
+      return kind === 'dir' ? stat.isDirectory() : stat.isFile();
+    },
+  };
+}
+
+function commitFiles(root, commit) {
+  const done = spawnSync('git', ['-c', 'core.quotePath=false', 'ls-tree', '-r', '-z', '--full-tree', '--name-only', commit], {
+    cwd: root,
+    encoding: 'utf8',
+    maxBuffer: 256 * 1024 * 1024,
+    windowsHide: true,
+  });
+  if (done.status !== 0) usageError(`git ls-tree ${commit} failed: ${(done.stderr || '').trim()}`);
+  const files = done.stdout.split('\0').filter((file) => file !== '');
+  const set = new Set(files);
+  return {
+    hasFile: (file) => set.has(file),
+    stillExists: (responsiblePath) => {
+      const kind = responsiblePathKind(responsiblePath);
+      if (kind === 'file') return set.has(responsiblePath);
+      return files.some((file) => matchesResponsiblePath(responsiblePath, file));
+    },
+  };
+}
+
+// movedFrom: old paths of renames in the same input whose new path exists.
+function responsiblePathStillExists(tree, responsiblePath, movedFrom) {
   if (movedFrom.some((old) => matchesResponsiblePath(responsiblePath, old))) return true;
-  if (kind === 'glob') return globExistsUnderRoot(root, responsiblePath);
-  const target = absoluteUnderRoot(root, responsiblePath.replace(/\/+$/, ''));
-  let stat;
-  try {
-    stat = fs.statSync(target);
-  } catch {
-    return false;
-  }
-  return kind === 'dir' ? stat.isDirectory() : stat.isFile();
+  return tree.stillExists(responsiblePath);
 }
 
 function main() {
@@ -411,10 +445,11 @@ function main() {
     ...[...DEFAULT_EXCLUDES, ...options.excludes].map((glob) => globToRegExp(glob)),
     ...DEFAULT_EXCLUDES_IGNORE_CASE.map((glob) => globToRegExp(glob, 'i')),
   ];
+  const tree = options.at ? commitFiles(root, options.at) : workingTreeFiles(root);
   const elements = readElements(ommRoot);
   const changes = parseChanges(changesText);
   const movedFrom = changes
-    .filter((change) => change.status === 'R' && fs.existsSync(absoluteUnderRoot(root, change.file)))
+    .filter((change) => change.status === 'R' && tree.hasFile(change.file))
     .map((change) => change.old);
 
   const matched = [];
@@ -476,7 +511,7 @@ function main() {
   for (const element of elements) {
     if (!deletionHits.has(element.path)) continue;
     if (element.paths.length === 0) continue;
-    if (element.paths.every((p) => !responsiblePathStillExists(root, p, movedFrom))) {
+    if (element.paths.every((p) => !responsiblePathStillExists(tree, p, movedFrom))) {
       deletionCandidates.push({ element: element.path, paths: [...element.paths] });
     }
   }
@@ -492,4 +527,5 @@ function main() {
   process.stdout.write(`${JSON.stringify(result)}\n`);
 }
 
-main();
+// Run only as a command; cache.mjs imports the helpers above.
+if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href) main();
